@@ -1,0 +1,947 @@
+---
+title: "Projet Méthodes avancées en apprentissage supervisé et non supervisé"
+output: 
+  word_document: 
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Partie 1 : TP4 : Détection de nouveauté par One-class SVM et Kernel PCA
+Dans cette partie, il s'agit de répondre aux questions posées dans le sujet du TP4.
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+#Import des librairies nécessaires
+library(knitr)
+library(tidyverse)
+library(fastDummies)
+```
+
+
+## 1. Présentation de l'étude cas
+L'étude de cas porte sur des données de médecine, plus précisément sur des tumeurs de cancer du sein, classées malignes ou bénignes à partir de différents variables quantitatives. Par ailleurs, on se trouve dans le cas d'un jeu de données déséquilibré, avec plus de cellules bénignes que malignes. Il s'agit ici d'aborder la problématique de la détection de nouveauté.
+
+
+## 2. Lecture et description des données
+
+### Question 1 : Informations générales
+En consultant le fichier, on apprend que la base de données est composée de 11 variables observées sur 699 individus, qui étaient à l'origine divisés en plusieurs groupes en fonction de la date de report faite par le docteur en charge de l'étude clinique. La variable cible est *"Class"*, codée 2 pour bénigne et 4 pour maligne.
+
+### Question 2 : Chargement des données
+On remarque que les données sont séparées par une virgule et que les données manquantes sont indiquées par des "?", il faut donc l'indiquer dans la commande **read.table** permettant d'importer les données. Cela se fait grâce aux arguments *sep* et *na.strings* respectivement. De plus, les noms de colonnes ne sont pas présents dans le jeu de données, nous pouvons alors les obtenir à partir du fichier d'informations.
+```{r}
+D = read.table("breast-cancer-wisconsin.data", sep = ",", na.strings = "?")
+colnames(D) = c("Sample_Code_Number", "Clump_Thickness", "Uniformity_Cell_Size", "Uniformity_Cell_Shape", "Marginal_Adhesion", "Single_Epithelial_Cell_Size", "Bare_Nuclei", "Bland_Chromatin", "Normal_Nucleoli", "Mitoses", "Class")
+```
+Nous avons en sortie une variable *D*, qui est un dataframe contenant les données, avec 699 observations et 11 variables, ainsi que les noms de colonnes. De plus, les "?" sont détectés comme des valeurs manquantes (NA).
+
+
+### Question 3 : Inspection des données
+```{r}
+class(D)
+```
+La première commande, **class**, nous donne le type de l'objet passé en paramètre, c'est-à-dire de la variable *D* que nous avons créée à la question précédente. Il s'agit bien d'un dataframe.
+
+```{r}
+str(D)
+```
+La deuxième commande, **str**, permet de visualiser de manière succincte la structure de l'objet passé en argument, à savoir ici du dataframe. Ainsi, on retrouve le type de l'objet, mais également le nombre d'individus et de variables de notre jeu de données, à savoir 699 observations et 11 variables. On retrouve aussi la liste des différentes variables, que nous avons choisi de renommer pour une facilité de lecture, avec leur type, et les premières valeurs prises par chaque variable.
+
+```{r}
+kable(head(D)) # on utilise kable pour le formatage de la sortie avec une table, plutôt que la sortie de base
+```
+La troisième commande, **head**, permet de visualiser les premières lignes de notre jeu de données.
+
+```{r}
+kable(summary(D), digits = 3)
+```
+Enfin, la fonction **summary**, produit des statistiques descriptives des différentes variables. Etant donné que toutes les variables ont été détectées comme des variables numériques, pour chacune d'entre elles, on va retrouver la valeur minimale, le premier quartile, la médiane, la moyenne, le troisième quartile et la valeur maximale. On peut d'ores et déjà remarquer que la variable *Bare_Nuclei* comporte des valeurs manquantes.
+
+
+Une autre remarque que nous avons pu faire sur le jeu de données concerne la variable *Sample_Code_Number*. Il s'agit des identifiants des patients, certes cette variable n'est pas pertinente dans des modèles de machine learning, cependant elle nous apprend quelque chose que nous avons jugé assez intéressant pour en parler.
+```{r}
+length(unique(D$Sample_Code_Number))
+```
+En effet, on peut voir que seuls 645 individus sur les 699 au total, possèdent un identifiant unique. Nous avons donc des observations avec les mêmes identifiants.
+
+```{r}
+kable(D %>% dplyr::select(Sample_Code_Number) %>% group_by(Sample_Code_Number) %>% summarise(n=length(Sample_Code_Number)) %>%arrange(desc(n)) %>% filter(n > 1), align = 'c')
+```
+On peut supposer que certains patients ont été observés plusieurs fois à différents moments. Ceci ne fait pas partie du TD mais nous nous sommes demandés si cette redondance d'information n'entraînerait pas un biais dans nos analyses futures.
+
+
+## 3. Séparation des données en "train" et "test"
+
+### Question 4 : Valeurs manquantes
+Afin d'identifier les valeurs manquantes, nous pouvons utiliser la fonction **complete.cases**, qui permet d'obtenir les individus sans valeurs manquantes dans le dataframe. Ainsi, en utilisant son contraire, avec le *!*, on obtient la strate des individus avec des valeurs manquantes.
+```{r}
+kable(D[!complete.cases(D), ])
+```
+Nous pouvons remarquer qu'il y a 16 individus comportant des valeurs manquantes dans le jeu de données, tous pour la variable *Bare_Nuclei*. Ces individus portent les identifiants suivants : 21, 41, 140, 146, 159, 165, 236, 250, 276, 293, 295, 298, 316, 322, 412 et 618.
+
+
+### Question 5 : Gestion des valeurs manquantes
+Dans cette question, on nous demande de modifier *D* de sorte à ce qu'il ne possède que des données complètes. Plusieurs méthodes sont alors possibles, soit utiliser uniquement les données complètes, soit imputer les données manquantes. Etant donné que seulement 16 observations sont manquantes, nous avons décidé de supprimer les observations présentant des valeurs manquantes. Pour cela, il suffit de ne garder que les individus sans valeurs manquantes grâce à la fonction **complete.cases**.
+```{r}
+D = D[complete.cases(D),]
+nrow(D)
+sum(is.na(D))
+```
+Le jeu de données comporte alors 683 observations et plus aucune donnée manquante.
+
+
+
+### Question 6 : Séparation variables explicatives et variable cible
+Les variables explicatives sont les variables 2 à 10, en effet l'identifiant est exclu car il n'apporte pas d'information dans les analyses. La variable cible est placée en dernière position du dataframe.
+```{r}
+X = D[,2:10]
+ncol(X)
+y = D[,11]
+```
+Il y a donc 9 variables explicatives, permettant de prédire la variable cible, à savoir le type de la tumeur.
+
+
+### Question 7 : Recodage de la variable cible
+La variable cible étant actuellement identifiée comme une variable numérique, prenant seulement les valeurs 2 et 4, nous allons la recoder.
+```{r}
+y = dummy_cols(y)[,3]
+```
+Pour cela, nous avons utiliser la fonction **dummy_cols** qui permet de créer un codage disjonctif complet de la variable passée en paramètre. Puis, comme la modalité bénigne doit être recodée en 0 et la modalité maligne en 1, il s'agit de sélectionner la troisième colonne du résultat fourni par la fonction.
+
+
+### Question 8 : Indices des observations benignes et malignes
+Rappelons que les tumeurs bénignes sont codées en 0 et les malignes en 1. Il faut alors sélectionner les observations qui correspondent à ces critères avec la fonction **which**.
+```{r}
+benin = which(y==0)
+malin = which(y==1)
+```
+Nous pouvons alors voir que 444 observations sont bénignes et 239 sont malignes.
+
+
+### Question 9 : Constitution des échantillons d'apprentissage et de test
+L'ensemble d'entraînement contient les 200 premières observations bénignes. Les autres observations bénignes ainsi que les observations malignes constituent l'ensemble de test.
+```{r}
+train_set = benin[1:200]
+test_set = c(benin[201:length(benin)], malin)
+```
+Dans la variable *train_set* se trouve les 200 observations correspondantes à l'échantillon d'apprentissage. La variable *test_set* quand à elle contient les 483 indices des observations de l'échantillon de test.
+
+
+## 4. One-Class SVM
+
+Le One-Class SVM pour la détection de nouveautés est une méthode d'apprentissage supervisé dont l'objectif est de déterminer la classe d'appartenance d'un objet, en apprenant à partir d'un ensemble d'entraînement contenant uniquement des objets d'une seule classe, bien qu'il existe d'autres classes possibles. Pour cela, on définit un hyperplan qui va rassembler une grande majorité des données d'un côté et peu voire pas de données de l'autre. Ainsi, le plan est utiliser comme frontière, et on va chercher à maximiser la marge entre cette frontière et l'origine de l'espace.
+
+
+### Question 10 : Chargement de la libraire
+Afin d'installer la librairie nécessaire, nous l'installons avec la commande **install.packages**, si elle n'a pas déjà été installée sur la machine, puis la chargeons avec la fonction **library**.
+```{r message=FALSE, warning=FALSE}
+#install.packages("e1071")
+library(e1071)
+```
+
+
+### Question 11 : Estimation du modèle
+La fonction **svm** permet d'entraîner un modèle de one-class SVM. Pour cela, il faut le spécifier dans l'argument *type*. De plus, on utilisera un noyau gaussien (radial), avec l'argument *kernel*, de paramètre *gamma* = 1/2. Il n'y a pas besoin de centrer-réduire les données vu qu'elles sont toutes sur la même échelle de 1-10.
+```{r}
+oc_svm_fit = e1071::svm(x = X[train_set,], y = y[train_set], type = "one-classification", kernel = "radial", gamma = 1/2, scale = FALSE)
+```
+On obtient ainsi un objet de type svm grâce auquel on pourra faire des prédictions.
+
+
+### Question 12 : Prédictions
+Grâce à la commande **predict**, nous pouvons prédire les scores des observations de test. Pour cela, nous spécifions l'objet de type svm que nous avons crée précédemment, les données de test, et l'argument *decision.values* à TRUE afin que les valeurs de décision soient calculées et retournées.
+```{r}
+oc_svm_pred_test = predict(oc_svm_fit,X[test_set,],decision.values = TRUE)
+```
+
+
+### Question 13 : Exécution de commandes
+```{r}
+attr(oc_svm_pred_test ,"decision.values")
+oc_svm_score_test=-as.numeric(attr(oc_svm_pred_test ,"decision.values"))
+```
+La première commande permet d'accéder à l'attribut *decision.values* de l'objet *oc_svm_pred_test* des prédictions. Ensuite, on définit les scores comme l'opposé des valeurs de décision.
+
+
+## 5. Courbe ROC
+
+### Question 14 : Chargement de la librairie ROCR
+La commande **install.packages** permet d'installer la librairie, si celle-ci ne l'est pas déjà, puis la fonction **library** la charge.
+```{r message=FALSE, warning=FALSE}
+#install.packages("ROCR")
+library(ROCR)
+```
+
+### Question 15 : Exécution de commandes
+```{r}
+pred_oc_svm=prediction(oc_svm_score_test ,y[test_set])
+oc_svm_roc = performance(pred_oc_svm, measure = "tpr", x.measure = "fpr")
+plot(oc_svm_roc)
+```
+Dans un premier temps, la commande **prediction**, qui prend en argument les prédictions puis les vraies valeurs de la variable cible, renvoie un objet de type *prediction*, qui contient notamment le nombre de faux positifs, de vrais positifs, de vrais négatifs ainsi que de faux négatifs. Ensuite, la commande **performance**, permet d'effectuer des mesures de performances. Dans notre cas, on souhaite calculer le taux de vrais positifs et le taux de faux positifs à l'aide de l'objet de type *prediction* que nous avons crée précédemment. Puis, nous affichons le taux de vrais positifs en fonction du taux de faux positifs, qui est donc la courbe ROC.
+
+
+### Question 16 : Commentaire sur les performances du modèle
+Parmi les outils d'évaluation d'un modèle, il y a la courbe ROC. Celle-ci comporte de nombreux avantages, dont notamment sa visualisation graphique. De ce fait, nous pouvons voir grâce à la courbe ROC que le modèle est performant. En effet, le point idéal est le cas (0,1), et on s'en rapproche. 
+Une autre manière de connaître la performance du modèle est de calculer l'indicateur numérique associé à la courbe ROC, qui est l'aire sous la courbe (AUC). L'AUC indique la probabilité pour que la fonction de score du modèle place un positif devant un négatif. Dans le meilleur des cas, l'AUC vaut 1.
+```{r}
+performance(pred_oc_svm, measure = "auc")@y.values
+```
+Dans notre cas, l'AUC est très proche de 1, notre modèle est donc performant.
+
+
+## 6. Kernel PCA
+
+Le kernel PCA est une méthode d'apprentissage non supervisé fondée sur l'Analyse en Composantes Principales à noyaux. Tout d'abord, il s'agit de projeter les données d'apprentissage dans un espace F grâce au calcul de la matrice à noyau K. Puis de transformer cette matrice afin ensuite de la diagonaliser pour pouvoir représenter les données d'apprentissage dans un espace de plus petite dimension. Enfin, on projette les données de test dans cet espace réduit.
+
+
+### Question 17 : Exécution de commandes
+```{r message=FALSE, warning=FALSE}
+#install.packages("kernlab")
+library(kernlab)
+kernel=rbfdot(sigma=1/8) 
+Ktrain=kernelMatrix(kernel, as.matrix(X[train_set,]))
+```
+Tout d'abord, nous chargeons la librairie **kernlab** nécessaire à l'utilisation des commandes suivantes. La commande **rbfdot** est une fonction de génération de noyau, et plus précisemment d'un noyau gaussien rbf de paramètre *sigma* = 1/8. On obtient ainsi en sortie une fonction qui peut être utilisée en tant qu'argument du noyau d'une autre fonction. Cette fonction à noyau est ainsi utilisée comme paramètre de la commande **kernelMatrix** avec la matrice des données d'entraînement. En sortie, on obtient une matrice carrée de taille 200*200 (la taille de l'échantillon d'apprentissage) des produits scalaires calculés avec la fonction à noyau précédemment créée. C'est à dire la matrice à noyau des données d'entraînement.
+
+
+### Question 18 : Exécution de commandes
+```{r}
+k2=apply(Ktrain,1,sum)
+k3=apply(Ktrain,2,sum)
+k4=sum(Ktrain)
+
+n = length(train_set)
+KtrainCent=matrix(0,ncol=n,nrow=n) 
+
+for (i in 1:n)
+{
+  for (j in 1:n) 
+  {
+    KtrainCent[i,j]=Ktrain[i,j]-1/n*k2[i]-1/n*k3[j]+1/n^2*k4 
+  }
+}
+```
+Dans un premier temps, la variable *k2* correspond à la somme en ligne de la matrice Ktrain. *k3* est la somme en colonne de la matrice Ktrain. *k4* est la somme des éléments de la matrice Ktrain. Dans l'équation (1), *k2* correspond à la somme sur s allant de 1 à n (n étant la taille du vecteur train_set, à savoir la taille des données d'apprentissage) de K(xi, xs). *k3* correspond à la somme sur r allant de 1 à n de K(xr, xj). Enfin, *k4* correspond au calcul de la double somme.
+Par la suite, on instancie *KtrainCent*, une matrice carrée de taille 200*200, avec des 0. Puis on parcourt les lignes et les colonnes pour transformer Ktrain en KtrainCent en appliquant la formule (1).
+
+
+### Question 19 : Décomposition spectrale
+```{r}
+eigen_KtrainCent = eigen(KtrainCent)
+```
+La fonction **eigen** calcule les valeurs propres et les vecteurs propres associés de la matrice passée en paramètre de la fonction. Ces calculs permettront de représenter dans un espace de dimension réduit les données d'entraînement.
+
+
+### Question 20 : Sélection des 80 axes principaux
+```{r}
+s = 80
+A = eigen_KtrainCent$vectors[,1:s] %*% diag(1/sqrt(eigen_KtrainCent$values[1:s]))
+```
+Tout d'abord, on instance une variable *s* à 80, qui va permettre de sélectionner les 80 premiers axes principaux. Les coefficients associés à ces axes sont ensuite contenus dans la variable *A*. Ils sont calculés comme le produit matriciel des 80 premiers vecteurs propres avec une matrice diagonale, créée avec la commande **diag**, composée d'une forme normalisée (1/racine(vp)) des valeurs propres.
+
+
+### Question 21 : Exécution de commandes
+```{r}
+K = kernelMatrix(kernel, as.matrix(X))
+```
+De manière analogue à la question 17, dans la commande **kernelMatrix** nous utilisons la fonction à noyau créée précedemment, et cette fois-ci toutes les données de notre dataset. Nous obtenons en sortie une matrice carrée d'ordre 683, la matrice à noyau *K*.
+
+
+### Question 22 : Termes composants l'équation (4)
+```{r}
+p1 = diag(K[test_set,test_set])
+p2 = apply(K[test_set,train_set], 1, sum)
+p3 = sum(K[train_set, train_set])
+```
+On initialise les 3 termes composants l'équation (4) dans les variables *p1*, *p2* et *p3* respectivement.
+
+
+### Question 23 : vecteur de la quantité (4) pour toute observation de test
+```{r}
+ps = p1 - (2/n)*p2 + (1/(n^2))*p3
+```
+A partir des variables définies précédemment, on peut déterminer le vecteur *ps* qui pour toute observation des données de test donne la quantité (4).
+
+
+### Question 24 : termes composants l'équation (5)
+```{r}
+f1 = K[test_set,train_set] 
+f2 = apply(K[train_set, train_set], 1, sum)
+f3 = p2
+f4 = p3
+```
+Les termes composants l'équation (5) sont assignés aux variables *f1*, *f2*, *f3* et *f4* respectivment.
+Le troisième terme est égal au terme *p2* déjà calculé.
+Le quatrième terme est égal au terme *p3* déjà calculé
+
+
+### Question 25 : matrice de la quantité (5) pour toute observation de test
+```{r}
+n2 = length(test_set)
+fl = matrix(0, ncol = s, nrow = n2)
+
+for (m in 1:s) #m pour les axes retenus
+{
+  cpt = 0 #le compteur pour boucler
+  for (i in 1:n2) #n2 pour le nombre de données tests
+  {
+    cpt = cpt + 1
+    tmp = 0 #variable temporaire permettant de calculer la somme au final
+    for (j in 1:n) #pour boucler sur les n lignes
+    {
+      tmp = tmp + (A[j,m] * (f1[cpt,j] - (1/n)*f2[j] - (1/n)*f3[cpt] + (1/n^2)*f4))
+    }
+    fl[cpt,m] = tmp
+  }
+}
+```
+Dans un premier temps, on instancie *fl* la matrice qui va contenir les quantités (5) pour toute observation de test, ainsi que *n2* le nombre de données tests. Puis, à partir des variables créées précédemment, on remplit la matrice avec la formule données en (5).
+
+
+### Question 26 : score défini en (3)
+```{r}
+kpca_score_test = ps - apply(fl^2, 1, sum)
+```
+Le score  en (3) est défini comme la quantité calculée en (4), contenue dans la variable *ps*, moins la somme sur les axes retenus de la quantité calculée en (5) au carré.
+
+
+### Question 27 : courbe ROC
+De la même manière que pour le SVM, on calcule les prédictions et les mesures de perfomance cette fois-ci pour le kernel PCA.
+```{r}
+pred_kpca=prediction(kpca_score_test ,y[test_set])
+kpca_roc = performance(pred_kpca, measure = "tpr", x.measure = "fpr")
+```
+
+Puis nous affichons les deux courbes sur le même graphique afin de les comparer. Nous avons modifié les couleurs pour une meilleure lisibilité.
+```{r}
+plot(oc_svm_roc, col='red')
+plot(kpca_roc, add=T,col="green")
+```
+Au premier abord, les deux méthodes semblent aussi performantes l'une que l'autre, avec peut-être une légère supériorité pour le kernel PCA. Nous pouvons vérifier cela en calculant l'aire sous la courbe pour cette méthode. Pour rappel, nous avions déjà calculé l'AUC pour le SVM et nous avions obtenu 0.9959188.
+```{r}
+performance(pred_kpca, measure = "auc")@y.values
+```
+En effet, l'AUC est légèrement plus élevé pour le kernel PCA. Ainsi, pour cette étude, nous préconiserions cette méthode pour répondre à la problématique, en sachant toutefois que le SVM donne également de très bons résultats.
+
+
+
+
+##################################################################################################################
+
+# Partie 2 : Etude de cas
+Dans cette partie, il s'agit de mettre en oeuvre et de comparer plusieurs méthodes d'apprentissage supervisé sur un jeu de données de notre choix.
+
+
+## 1. Import et présentation du jeu de données
+Le jeu de données provient du domaine de la santé et correspond à des mesures physiques réalisées sur des individus ainsi que des performances liés à l'exercice physique. Il s'agit de prédire le niveau de performance des individus en fonction des différentes variables numériques.
+
+Tout d'abord, nous importons le jeu de données avec la commande **read.csv**.
+```{r}
+D = read.csv("bodyPerformance.csv",header=TRUE,sep=',')
+```
+
+Puis nous en affichons sa structure.
+```{r}
+str(D)
+```
+Le jeu de données est composée de 12 variables observées sur 13393 individus. Quasiment toutes les variables sont quantitatives, sauf le sexe (*gender*), mais que nous recoderons par la suite, et la variable cible.
+
+Les 12 variables qui composent le jeu de données sont les suivantes : 
+* *age*, l'âge exprimé en années
+* *gender*, le genre codé M ou F
+* *height_cm*, la taille en centimètres
+* *weight_kg*, le poids en kilogrammes
+* *body.fat_.*, la graisse corporelle exprimée en pourcentage
+* *diastolic*, la pression artérielle diastolique exprimée en millimètres de mercure (mmHg)
+* *systolic*, la pression artérielle systolique exprimée en millimètres de mercure (mmHg)
+* *gripForce*, le résultat d'un test de force musculaire 
+* *sit.and.bend.forward_cm*, la mesure en centimètres lorsque l'on s'assoit et que l'on se penche en avant
+* *sit.ups.counts*, le nombre maximal de redressements assis en 2 minutes
+* *broad.jump_cm*, le saut en longueur exprimé en centimètres
+* *class*, la performance.
+
+Nous pouvons également regarder les statistiques descriptives du jeu de données afin de mieux en prendre connaissance.
+```{r}
+summary(D)
+```
+
+Puis nous en affichons les premières lgines.
+```{r}
+head(D)
+```
+
+Voyons maintenant la répartition des différentes modalités de la variable cible.
+```{r}
+prop.table(table(D$class))
+```
+On peut voir que les modalités sont réparties quasiment de la même manière dans le jeu de données. Il ne sera pas question de ré-échantillonage ou de jeu de données déséquilibré.
+
+
+## 2. Pré-traitement des données
+Commençons par vérifier la présence de données manquantes dans le dataframe. 
+```{r}
+ok <- complete.cases(D) #Récupération de booléens pour savoir si une observation est une valeur manquante ou non
+print(sum(!ok))
+```
+Aucune valeur manquante n'est à déplorer. Nous pouvons passer au recodage de certaines variables.
+
+Pour la variable *gender*, codée "M" ou "F", nous la recodons en 0, 1.
+```{r message=FALSE, warning=FALSE}
+#install.packages("dplyr")
+library(dplyr)
+D$gender = recode(D$gender, F = 0, M = 1)
+```
+
+
+Ensuite, nous séparons le jeu de données en données d'apprentissage et de test. Nous avons choisi 30% pour le test et 70% pour le train.
+```{r}
+set.seed(123)
+id = sample(nrow(D),nrow(D)*0.7)
+
+training_data = D[id,]
+testing_data = D[-id,]
+```
+
+Nous vérifions que l'équilibre des classes est toujours présent.
+```{r}
+print(prop.table(table(training_data$class)))
+print(prop.table(table(testing_data$class)))
+```
+
+
+
+En fonction des librairies utilisées par la suite, nous aurons besoin soit des variables réunies, soit des variables explicatives séparées de la variable cible.
+```{r}
+X_train = training_data[,-12]
+X_test = testing_data[,-12]
+
+y_train = training_data[,12]
+y_test = testing_data[,12]
+```
+
+Par ailleurs, les variables explicatives étant exprimées dans des unités différentes, nous allons les standardiser. Nous utilisons uniquement les moyennes et écarts-types calculés sur l'échantillon d'apprentissage pour normaliser les deux échantillons.
+```{r}
+mean_train = sapply(X_train,mean)
+sd_train <- sapply(X_train,sd)
+
+X_train_scale = data.frame(scale(X_train, center = mean_train, scale = sd_train))
+X_test_scale = data.frame(scale(X_test, center = mean_train, scale = sd_train))
+
+training_data_scale = cbind(X_train_scale, class = y_train)
+testing_data_scale = cbind(X_test_scale, class = y_test)
+```
+
+
+## 3. Validation croisée permettant d'évaluer les performances de différentes méthodes
+
+### 3.1. Modèle linéaire pénalisé par une fonction de régularisation elasticnet
+
+Elastic net est une méthode de régression servant à régulariser des modèles linéaires ou logistiques.
+
+La librarie utilisée ici est la librairie glmnet, utilisée pour de l'ajustement des modèles Lasso ou Elastic Net pour de la régression.
+
+Installation et chargement de la librairie glmnet
+```{r}
+#install.packages('glmnet')
+library(glmnet)
+```
+
+Nous allons tester les différentes valeurs du paramètre alpha comprises entre 0.1 et 0.9
+```{r}
+set.seed(123)
+#liste des hyperparamètres
+param_alpha <- list(alpha = seq(from=0.1, to=0.9, by = 0.1))
+#Nous transformons maintenant la variable param_alpha en grid
+param_alpha=expand.grid(param_alpha)
+
+#nombre de ligne de param_alpha
+n=nrow(param_alpha)
+#Nous initialisons des vecteurs de 0 pour lambda et pour l'erreur
+lambda = rep(0,n)
+erreur=rep(0,n)
+
+# recherche des meilleurs paramètres
+for (i in 1:n){
+  cv.en = cv.glmnet(x=as.matrix(X_train),y=as.matrix(y_train),family="multinomial",type.multinomial="grouped",nfolds=10,alpha=param_alpha$alpha[i], standardize = T)
+  #Plus petit lambda
+  #lambda min
+  lambda[i] = cv.en$lambda.min
+  
+  #prédiction
+  pred.en = predict(cv.en,as.matrix(X_test),s=c(cv.en$lambda.min),type="class")
+  conf=table(y_test,pred.en)
+  e=1-sum(diag(conf))/sum(conf)
+  erreur[i]=e
+}
+
+```
+
+```{r}
+res = cbind(cbind(param_alpha,lambda),erreur)
+print(res)
+```
+
+Nous affichons ensuite un graphique avec les erreurs calculées et les alpha
+```{r}
+plot(res$alpha,res$erreur,type="b")
+```
+La meilleure valeur de alpha estimée en validation croisée est de 0.9.
+
+Validation croisée avec alpha minimisant l'erreur
+```{r}
+cv.en2 <-cv.glmnet(x=as.matrix(X_train),y=as.matrix(y_train),family="multinomial",type.multinomial="grouped", nfolds=10,alpha=res[res$erreur==min(res$erreur),'alpha'], standardize = T)
+plot(cv.en2)
+
+pred.en = predict(cv.en2,as.matrix(X_test),s=c(min(res$lambda)),type="class")
+print(table(y_test,pred.en))
+
+erreur_elasticnet = (sum(y_test != pred.en)/length(y_test))
+print(erreur_elasticnet)
+```
+Le modèle de régression elasticnet  donne un taux d'erreur de prédiction de 39%. Nous avons tenter d'optimiser alpha et lambda afin d'obtenir le taux d'erreur le plus faible en validation croisée.
+
+### 3.2. Réseau de neurones avec une couche cachée
+
+Un réseau de neurones est une succession de neurones caractérisé par le nombre de couche dans le réseau, le nombre de neurones dans chaque couche, les fonctions d'activations utilisées, le type de tâche à réaliser (régression, classification).  
+Le premier neurone reçoit les données "brutes". Ensuite, chaque neurone réalise une combinaison linéaire des entrées qu'il a reçu, à laquelle un biais est ajouté. La valeur de sortie du neurone est calculée grâce à une fonction dite fonction d'activation. Puis cette valeur est transmise au neurone de la couche suivante, etc jusqu'à la couche de sortie.  
+Lors de la phase d'entraînement d'un réseau de neurones, l'algorithme va déterminer les coefficients synaptiques permettant de minimiser l'erreur sur les données d'apprentissage.
+
+
+#### Première approche : librairie nnet
+Dans un premier temps, nous allons utiliser la librairie **nnet**. Elle est utilisée pour les perceptrons avec une seule couche cachée.
+```{r message=FALSE, warning=FALSE, include=FALSE}
+#install.packages("nnet")
+library(nnet)
+```
+
+
+Essayons avec 2 neurones (*size = 2*) dans l'unique couche cachée (*skip = F*).
+```{r}
+set.seed(123)
+nn_nnet = nnet(as.factor(class) ~ ., data = training_data_scale, skip = F, size = 2)
+```
+
+On calcule ensuite les prédictions permettant l'évaluation du modèle.
+```{r}
+pred_nn_nnet = predict(nn_nnet,newdata=X_test_scale,type="class")
+```
+
+Nous calculons la matrice de confusion : 
+```{r}
+mc_nn_nnet = table(testing_data_scale$class,pred_nn_nnet)
+print(mc_nn_nnet)
+```
+
+Puis le taux d'erreur : 
+```{r}
+err_nn_nnet = 1-sum(diag(mc_nn_nnet))/sum(mc_nn_nnet)
+print(err_nn_nnet)
+```
+
+Avec les paramètres par défaut pour notre première tentative, le taux d'erreur est assez élevé. Nous allons tenter de "jouer" avec les paramètres pour construire un modèle adapté aux données d'apprentissage mais également performant sur la prédiction des nouvelles observations. Les paramètres sur lesquels nous pouvons travailler sont *size*, qui correspond au nombre de neurones dans la couche cachée et *decay*, le pas d'apprentissage.
+Pour faire cela, nous allons utiliser la fonction **tune** du package **e1071**.
+```{r message=FALSE, warning=FALSE}
+#install.packages("e1071")
+library(e1071)
+set.seed(123)
+nn_nnet_tune = tune.nnet(as.factor(class) ~ ., data = training_data_scale, skip = F, size = c(5,7,10), decay = c (0.1, 0.01, 0.001))
+```
+
+Nous pouvons maintenant regarder les résultats avec les différents paramètres utilisés.
+```{r message=FALSE, warning=FALSE, include=FALSE}
+#install.packages("ggplot2")
+library(ggplot2)
+```
+
+```{r}
+ggplot(nn_nnet_tune$performances, aes(x=size, y=error, group = as.factor(decay))) + geom_line(aes(color=as.factor(decay))) + geom_point(aes(color=as.factor(decay))) + theme_classic()
+```
+Vis à vis de chaque ensemble de paramètres utilisés, on peut mettre en évidence que plus le nombre de neurones dans la couche cachée est grand, plus le taux d'erreur baisse, en revanche pour le pas d'apprentissage il est plus difficile de démarquer les différentes valeurs testées les unes des autres.
+
+Nous affichons alors les paramètres du meilleur modèle estimé en validation croisée, que nous pouvons également lire sur le graphique précédent.
+```{r}
+nn_nnet_tune
+```
+
+Il semblerait que le modèle avec 10 neurones dans la couche cachée et un pas d'apprentissage de 0.01 soit le meilleur. 
+Nous allons tout d'abord ré-estimé le modèle supposé optimal pour pouvoir en avoir une sortie graphique.
+```{r}
+nn_nnet_best = nnet(as.factor(class) ~ ., data = training_data_scale, skip = F, size = 10, decay = 0.01 )
+```
+
+```{r message=FALSE, warning=FALSE}
+#install.packages("gamlss.add")
+library(gamlss.add)
+plot(nn_nnet_best)
+```
+
+Egalement , c'est celui que nous allons retenir pour la validation croisée.
+```{r}
+set.seed(123)
+nb_folds = 10
+n = nrow(D)
+err = rep(0,nb_folds)
+folds_obs = sample(rep(1:nb_folds,length.out=n))
+for (k in 1:nb_folds)
+{
+  print(paste("===== Fold :",k))
+  
+  test = which(folds_obs==k)
+  test_cv = D[test,]
+  
+  train = setdiff(1:n,test)
+  train_cv = D[train,]
+
+  X_train_cv = train_cv[,-12]
+  X_test_cv = test_cv[,-12]
+
+  y_train_cv = train_cv[,12]
+  y_test_cv = test_cv[,12]
+
+  mean_train_cv = sapply(X_train_cv,mean)
+  sd_train_cv <- sapply(X_train_cv,sd)
+
+  X_train_cv_scale = data.frame(scale(X_train_cv, center = mean_train_cv, scale = sd_train_cv))
+  X_test_cv_scale = data.frame(scale(X_test_cv, center = mean_train_cv, scale = sd_train_cv))
+
+  training_cv_scale = cbind(X_train_cv_scale, class = y_train_cv)
+  testing_cv_scale = cbind(X_test_cv_scale, class = y_test_cv)
+  
+  cv_nnet=nnet(as.factor(class) ~ ., data = training_cv_scale, skip = F, size = 10, decay = 0.01)
+  
+  pred_cv_nnet = predict(cv_nnet,newdata=testing_cv_scale,type="class")
+  
+  cm_cv = table(testing_cv_scale$class,pred_cv_nnet)
+  
+  e=1-sum(diag(cm_cv))/sum(cm_cv)
+  
+  err[k]=e
+}
+```
+
+Nous pouvons également afficher le taux d'erreur pour chaque fold.
+```{r}
+plot(err,type="b")
+```
+
+Et pour terminer, la validation croisée nous permet d'évaluer les performances de notre modèle.
+```{r}
+erreur_nn = mean(err)
+print(erreur_nn)
+```
+Ainsi, en moyenne nous avons un taux d'erreur de 0.27.
+
+
+#### Deuxième approche : librairie neuralnet
+Pour cette deuxième approche, nous utilisons la librairie **neuralnet**. Celle-ci permet de réaliser tout types de réseaux de neurones. Nous nous limitons à une seule couche cachée pour commencer.
+```{r message=FALSE, warning=FALSE}
+library(neuralnet)
+library(fastDummies)
+```
+
+Pour l'utilisation de la fonction **neuralnet**, nous devons tout d'abord créer une variable contenant explicitement la formule passée en paramètres de la fonction *neuralnet*, celle-ci ne pouvant gérer les formules abrégées (avec le point).
+```{r}
+nom_var_exp = names(training_data_scale)[1:11]
+nom_clas_cib = names(training_data_scale)[12]
+var_exp=paste(nom_var_exp,collapse = "+")
+clas_cib=paste(nom_clas_cib,collapse = "+")
+mod=paste(clas_cib,"~",var_exp,sep="")
+mod=as.formula(mod)
+```
+
+Par ailleurs, nous devons également transformer la variable cible en facteur.
+```{r}
+training_data_scale$class = as.factor(training_data_scale$class)
+```
+
+Ensuite, nous lançons l'apprentissage. De nombreux paramètres sont à prendre en compte :
+* *hidden*, pour le nombre de neurones dans la couche caché
+* *threshold*, le critère d'arrêt des dérivées partielles de la fonction d'erreur, par défaut à 0.01
+* *algorithm*, le choix de l'algorithme, par défaut il s'agit de la rétropropagation résiliente avec retour de poids
+* *err.fct*, la fonction pour le calcul de l'erreur (*ce* pour entropie croisée et *sse* pour la somme des erreurs au carré)
+* *linear.output*, afin de réaliser ou non une regression linéaire. Par défaut à *TRUE*, mais nous le fixons à *FALSE* puisque nous sommes dans un problème de classification.
+
+```{r}
+set.seed(123)
+nn_neuralnet = neuralnet(formula = mod, data = training_data_scale, hidden = 5, err.fct = "sse", linear.output = FALSE, threshold = 0.1)
+```
+
+
+Nous pouvons alors visualiser graphiquement le résultat avec les poids synaptiques.
+```{r}
+plot(nn_neuralnet)
+```
+
+On calcule ensuite les probabilités d'affectation sur l'échantillon test.
+```{r}
+prob_nn_neuralnet = compute(nn_neuralnet, X_test_scale)
+```
+
+Il nous faut ensuite déterminer la classe pour laquelle la probabilité d'affectation est la plus élevée pour chaque nouvelle observation. Et nous retrouvons la vraie classe de la même manière.
+```{r}
+pred_clas_nn_neuralnet = apply(prob_nn_neuralnet$net.result,1,which.max)
+true_clas_nn_neuralnet = as.numeric(as.factor(testing_data_scale$class))
+```
+
+Nous calculons la matrice de confusion : 
+```{r}
+mc_nn_neuralnet = table(true_clas_nn_neuralnet,pred_clas_nn_neuralnet)
+print(mc_nn_neuralnet)
+```
+
+Puis le taux d'erreur : 
+```{r}
+err_nn_neuralnet = 1-sum(diag(mc_nn_neuralnet))/sum(mc_nn_neuralnet)
+print(err_nn_neuralnet)
+```
+A nouveau, avec la librairie **neuralnet** cette fois-ci, notre première tentative avec les paramètres par défaut donne un taux d'erreur assez élevé. 
+
+Nous allons essayer de tester avec des combinaisons de paramètres différentes pour améliorer notre modèle.
+Il faut dans un premier temps définir la grille de recherche pour les paramètres. Etant donné le nombre de paramètres relativement important dans la fonction **neuralnet**, nous avons sélectionné ceux qui nous paraissent les plus importants, à savoir le nombre de neurones dans la couche cachée et le critère d'arrêt.
+```{r}
+tune.grid.neuralnet = expand.grid(hidden = c(2,5,7,10), threshold = c(0.1,0.01))
+```
+
+Puis nous effectuons la recherche des paramètres optimaux. Cependant, nous n'avons pas pu du fait de la non convergence de l'algorithme malgré différents essais.
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+n = nrow(tune.grid.neuralnet)
+
+for (i in 1:n)
+{
+  nn_neuralnet_GridSearch = neuralnet(formula = mod, data = training_data_scale, hidden = tune.grid.neuralnet$hidden[i], err.fct = "sse", linear.output = FALSE, threshold = tune.grid.neuralnet$threshold[i])
+  
+  prob_nn_neuralnet_GridSearch = compute(nn_neuralnet_GridSearch,X_test_scale)
+
+  pred_clas_nn_neuralnet_GridSearch = apply(prob_nn_neuralnet_GridSearch$net.result,1,which.max)
+  true_clas_nn_neuralnet_GridSearch = as.numeric(as.factor(testing_data_scale$class))
+  
+  mc_nn_neuralnet_GridSearch = table(true_clas_nn_neuralnet_GridSearch, pred_clas_nn_neuralnet_GridSearch)
+  err_nn_neuralnet_GridSearch = 1-sum(diag(mc_nn_neuralnet_GridSearch))/sum(mc_nn_neuralnet_GridSearch)
+  tune.grid.neuralnet$error[i] = err_nn_neuralnet_GridSearch
+}
+```
+
+
+
+### 3.3. SVM
+
+Présentation de la méthode :
+
+La méthode SVM signifie Machine à vecteurs de support ou séparateur à vaste marge en français. Ce sont des algorithmes d'apprentissage supervisé qui permettent de résoudre des problèmes de classification, regression ou de détection d'anomalies. Les SVM sont des généralisations des classifieurs linéaires. 
+Le principe des SVM est simple, ils ont pour but de séparer les données en classes à l’aide d’une frontière aussi simple que possible, de telle façon que la distance entre les différents groupes de données et la frontière qui les sépare soit maximale. 
+
+Présentation de la librairie utilisée : 
+
+La librairie utilisée est la librairie "e1071". Elle permet l'analyse de différentes méthodes comme le clustering flou, les SVM, le calcul du plus court chemin, les k-plus proche voisins... 
+Pour les SVM, cette librairie nous permet d'entraîner notre modèle avec la fonction svm(), de rechercher les paramètres optimaux avec la fonction tune.svm() et de faire la validation croisée avec svm() aussi. 
+
+
+
+```{r}
+#Chargement du package
+library(e1071)
+```
+
+Après avoir chargé la librairie, la première étape était de savoir quel est le noyau le plus adapté pour nos données pour le modèle SVM. Pour cela, nous avons entraîné un modèle différent pour chaque noyau sur nos données et nous avons comparé les résultats. 
+
+```{r}
+#Recherche du noyau idéal
+set.seed(123)
+training_data_scale$class = as.factor(training_data_scale$class)
+
+SVM_lineaire = svm(class~., data=training_data_scale,kernel="linear",scale=F,type="C-classification")
+SVM_poly = svm(class~., data=training_data_scale,kernel="polynomial",scale=F,type="C-classification")
+SVM_radial = svm(class~., data=training_data_scale, kernel="radial",scale=F,type="C-classification")
+SVM_sig = svm(class~., data=training_data_scale, kernel="sigmoid",scale=F,type="C-classification")
+
+summary(SVM_lineaire) #7161 vecteurs de supports
+summary(SVM_poly)     #7267 vecteurs de supports
+summary(SVM_radial)   #6946 vecteurs de supports
+summary(SVM_sig)      #5766 vecteurs de supports
+```
+
+La fonction svm() permet d'entraîner notre modèle sur nos données d'apprentissage. Les paramètres de cette fonction sont nombreux mais nous avons uniquement utilisé ceux décrits ci-dessous:
+**formula** : la formule à estimer avec la variable cible et les variables explicatives.
+**data** : le jeu de données utilisé.
+**kernel** : le noyau utilisé.
+**scale** : si on standardise les variables ou non.
+**type** : le type de SVM utilisé (classification ou régression). 
+
+Ici, nous réalisons une classification pour prédire la variable "class" en fonction de toutes les autres. Nous utilisons donc le type "C-classification" et les données d'entrainement. 
+
+En regardant les résultats de nos quatre modèles, nous pouvons voir qu'ils estiment un nombre de vecteurs supports différents.Les « vecteurs de support » sont les points les plus proches de la frontière. Le modèle linéaire estime le plus grand nombre de vecteurs de supports et le modèle sigmoïd le moins. Le nombre moyen de points supports est d'environ 6500 sur les 13 393 données ce qui est quand-même assez important. 
+
+Pour trouver le meilleur noyau pour nos données, nous avons appliqué chaque modèle sur nos données test pour estimer l'erreur de prédiction et les comparer. 
+
+```{r}
+# NOYAU LINEAIRE 
+
+# prédiction sur l'ensemble test
+predict_lineaire=predict(SVM_lineaire,newdata=testing_data_scale,type="class")
+
+# Matrice de confusion
+matrice_confusion_lineaire = table(predict_lineaire, y_test) ; matrice_confusion_lineaire
+
+#Taux d'erreur
+err_lineaire = 1-sum(diag(matrice_confusion_lineaire))/sum(matrice_confusion_lineaire) ; err_lineaire
+
+# Avec le noyau linéaire et les paramètres initiaux, nous avons un taux d'erreur de 37,97%.
+
+```
+
+```{r}
+# NOYAU POLYNOMIAL
+
+# prédiction sur l'ensemble test
+predict_poly=predict(SVM_poly,newdata=testing_data_scale,type="class")
+
+# Matrice de confusion
+matrice_confusion_poly = table(predict_poly, y_test) ; matrice_confusion_poly
+
+#Taux d'erreur
+err_poly = 1-sum(diag(matrice_confusion_poly))/sum(matrice_confusion_poly) ; err_poly
+
+# Avec le noyau polynomial et les paramètres initiaux, nous avons un taux d'erreur de 37.03%. 
+```
+
+```{r}
+# NOYAU RADIAL
+
+# prédiction sur l'ensemble test
+predict_radial=predict(SVM_radial,newdata=testing_data_scale,type="class")
+
+# Matrice de confusion
+matrice_confusion_radial = table(predict_radial, y_test) ; matrice_confusion_radial
+
+#Taux d'erreur
+err_radial = 1-sum(diag(matrice_confusion_radial))/sum(matrice_confusion_radial) ; err_radial
+
+# Avec le noyau radial et les paramètres initiaux, nous avons un taux d'erreur de 31.13%.
+``` 
+
+```{r}
+# NOYAU SIGMOID
+
+# prédiction sur l'ensemble test
+predict_sig=predict(SVM_sig,newdata=testing_data_scale,type="class")
+
+# Matrice de confusion
+matrice_confusion_sig = table(predict_sig, y_test) ; matrice_confusion_sig
+
+#Taux d'erreur
+err_sig = 1-sum(diag(matrice_confusion_sig))/sum(matrice_confusion_sig) ; err_sig
+
+# Avec le noyau sigmoid et les paramètres initiaux, nous avons un taux d'erreur de 57.78%.
+```
+
+Concernant les paramètres de la fonction "predict", nous pouvons voir :
+**object** : le modèle d'apprentissage, ici, les différents modèles précédents avec les différents noyaux. 
+**newdata** : les données pour la prédiction, ici, les données de test.
+**type** : le type de prédiction, ici, les classes d'appartenance avec les différentes classes "A","B","C" ou "D". 
+
+Nous avons utilisé les paramètres par défaut pour chaque noyau. Nous pouvons voir que le taux d'erreur pour le noyau linéaire est d'environ 37%, pour le noyau polynomial 37%, pour le noyau radial 31% et pour le noyau sigmoïd 57%. 
+Donc, pour nos données, le noyau le plus adapté pour les SVM est le noyau radial. Le noyau radial est défini ainsi : exp(-gamma*|u-v|^2)). 
+
+Le noyau qui nous donne des meilleures prédictions est le noyau radial, cependant, avec les paramètres par défaut, nous obtenons un taux d'erreur de prédiction de 31% ce qui est important. Nous devons donc tester différentes valeurs pour chaque paramètre de la fonction afin de trouver les meilleurs paramètres. Pour les SVM, les paramètres les plus importants sont C et Gamma. 
+**C** correspond au paramètre de régularisation soit la taille de la marge du SVM. Les points situés à l'intérieur de cette marge ne sont classés dans aucune classe. La force de la régularisation est inversement proportionnelle à C donc quand la valeur de C augmente, la marge diminue et quand elle diminue, la marge augmente. 
+**gamma** contrôle la distance de l'influence d'un seul point d'entraînement dans le cas du noyau radial. De faibles valeurs de gamma indiquent un grand rayon de similarité qui se traduit par le regroupement de plus de points. Pour des valeurs élevées de gamma, les points doivent être très proches les uns des autres afin d'être considérés dans le même groupe (ou classe). Par conséquent, les modèles avec des valeurs gamma très élevées ont tendance à se surajuster.
+
+Pour cela, nous utilisons la fonction tune.svm(). Les différents paramètres de cette fonction que nous utilisons et qui n'ont pas été présentés précédemment sont : 
+**gamma** : paramètre gamma présenté précédemment.
+**cost** : paramètre C présenté précédemment. 
+
+
+```{r}
+set.seed(123)
+param_opti = tune.svm(class~., data=training_data_scale, kernel='radial', scale=F, type = "C-classification", gamma = seq(0.01, 0.1, by = 0.01), cost = seq(0.1,1, by = 0.1))
+
+param_opti$best.model
+param_opti$best.parameters
+```
+
+Nous constatons que les meilleurs paramètres pour ce modèle sont gamma = 0.1 et cost = 1. 
+
+```{r}
+ggplot(param_opti$performances, aes(x=cost, y=error, group = as.factor(gamma))) + geom_line(aes(color=as.factor(gamma))) + geom_point(aes(color=as.factor(gamma))) + theme_classic()
+```
+Sur le graphique, nous pouvons voir que plus gamma et cost augmentent et plus le taux d'erreur diminue. 
+
+Pour finir, nous avons réalisé une validation croisée afin d'obtenir le score moyen de performance de notre modèle. 
+
+```{r}
+set.seed(123)
+nb_folds = 10
+n = nrow(D)
+err = rep(0,nb_folds)
+folds_obs = sample(rep(1:nb_folds,length.out=n))
+for (k in 1:nb_folds)
+{
+  print(paste("===== Fold :",k))
+  
+  test = which(folds_obs==k)
+  test_cv = D[test,]
+  
+  train = setdiff(1:n,test)
+  train_cv = D[train,]
+  
+  X_train_cv = train_cv[,-12]
+  X_test_cv = test_cv[,-12]
+  
+  y_train_cv = train_cv[,12]
+  y_test_cv = test_cv[,12]
+  
+  mean_train_cv = sapply(X_train_cv,mean)
+  sd_train_cv <- sapply(X_train_cv,sd)
+  
+  X_train_cv_scale = data.frame(scale(X_train_cv, center = mean_train_cv, scale = sd_train_cv))
+  X_test_cv_scale = data.frame(scale(X_test_cv, center = mean_train_cv, scale = sd_train_cv))
+  
+  training_cv_scale = cbind(X_train_cv_scale, class = y_train_cv)
+  testing_cv_scale = cbind(X_test_cv_scale, class = y_test_cv)
+  
+  cv_svm = svm(as.factor(class)~., data=training_cv_scale, kernel="radial",scale=F,type="C-classification",
+               gamma = 0.1, cost =1)
+  
+  pred_cv_nnet = predict(cv_svm,newdata=testing_cv_scale,type="class")
+  
+  cm_cv = table(testing_cv_scale$class,pred_cv_nnet)
+  
+  e=1-sum(diag(cm_cv))/sum(cm_cv)
+  
+  err[k]=e
+}
+```
+Nous pouvons réaliser un graphique qui montre l'évolution de l'erreur. 
+
+```{r}
+plot(err,type="b")
+```
+Pour connaître la performance réelle de notre modèle, il faut faire la moyenne de l'erreur des 10 validations croisées. En effet, ce taux d'erreur est plus robuste. 
+
+```{r}
+erreur_svm = mean(err)
+print(erreur_svm)
+```
+Nous pouvons donc voir que notre modèle d'SVM avec un noyau radial, gamma = 0.1 et cost = 1 donne un taux d'erreur de prédiction d'environ 28%.
+Avec les paramètres par défaut d'un noyau radial, nous avions un taux d'erreur de 30% donc nous pouvons en déduire que l'optimisation des paramètres n'a pas fait réellement baisser le taux d'erreur. Ce taux d'erreur est quand même assez important. 
+Pour aller plus loin, on aurait pu tester plus de valeurs pour les paramètres gamma et cost. Cependant, le temps d'éxécution de la fonction tune() était très important et plus on augmente les paramètres à tester et plus c'est long. 
+
+
+
+### 4. Comparaison des meilleurs modèles pour chaque type de méthode
+
+Ainsi, pour chaque type de modèle, nous avons identifié le meilleur modèle en réalisant un tuning des hyperparamètres. Puis nous avons évalué le taux d'erreur de ce meilleur modèle en validation croisée.
+```{r}
+erreurs = c(erreur_elasticnet, erreur_nn, erreur_svm)
+```
+
+Nous pouvons alors affiché les résultats obtenus pour chaque modèle.
+```{r}
+plot(erreurs)
+```
+Le premier modèle, qui correspond au modèle linéaire pénalisé par une fonction de régularisation elasticnet est celui qui donne le moins bon résultat. Pour ce modèle, nous avons tenté d'optimiser en même temps alpha et lambda pour obtenir le plus petit taux d'erreur en validation croisée. Or, plus on augmente le nombre de paramètres à optimiser, plus le processus devient spécifique aux données, et on risque le problème de surapprentissage.
+Concernant le réseau de neurones et le SVM, le taux d'erreur est plus faible, et quasi comparable entre les deux méthodes. Il pourrait donc s'agir des modèles à privilégier pour répondre à ce problème de classification de la performance des individus.  
